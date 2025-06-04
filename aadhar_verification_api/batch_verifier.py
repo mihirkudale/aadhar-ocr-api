@@ -6,6 +6,7 @@ from collections import Counter
 from pymongo import MongoClient
 import numpy as np
 from aadhaar_verifier import PaddleAadhaarExtractor, verify_fields, decode_base64_aadhaar
+import requests
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -13,14 +14,35 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # Initialize Aadhaar extractor
 extractor = PaddleAadhaarExtractor()
 
+
+def generate_ref_number(decoded_aadhaar):
+    """
+    Calls the external service to fetch Aadhaar reference number.
+    """
+    url = 'https://aadhar.trti-maha.in:8080/'
+    data = {
+        'entered_uid': decoded_aadhaar,
+        'entered_url': '',  # Optional: use actual request URL if needed
+        'entered_opr': 'struid'
+    }
+
+    try:
+        response = requests.post(url, data=data, timeout=30, verify=False)  # Insecure: SSL verification disabled
+        response.raise_for_status()
+        json_data = response.json()
+        return json_data.get("refnum", "N/A")  # Return refnum or fallback
+    except requests.exceptions.RequestException as e:
+        logging.error(f" Error fetching Aadhaar ref number: {str(e)}")
+        return "Error"
+
 def run_batch_verification():
     # MongoDB connection
     client = MongoClient("mongodb://localhost:27017/")
     db = client["aadhar"]
-    collection = db["15_Records"]
+    collection = db["coll_candidates"]
 
     applicants = list(collection.find({}))
-    logging.info(f"✅ Total records fetched from MongoDB: {len(applicants)}")
+    logging.info(f" Total records fetched from MongoDB: {len(applicants)}")
 
     results = []
 
@@ -28,7 +50,7 @@ def run_batch_verification():
         try:
             aadhaar_path = record.get("aadhaar_doc")
             if not aadhaar_path:
-                print(f"[{i+1}] {record.get('auth_id')} ❌ Missing Aadhaar path.")
+                print(f"[{i+1}] {record.get('auth_id')} Missing Aadhaar path.")
                 continue
 
             aadhaar_url = f"https://cpetp.trti-maha.in/{aadhaar_path}"
@@ -57,21 +79,43 @@ def run_batch_verification():
                 "ocr_confidence": round(avg_confidence, 2)
             }
 
-            results.append(result_entry)
+            
 
-            # ✅ Clean one-line output
+            # Clean one-line output
             print(
                 f"[{i+1}/{len(applicants)}] {record.get('auth_id')} → {result['decision']} | "
                 f"Name={result['name_match']} | DOB={result['dob_match']} | "
                 f"Gender={result['gender_match']} | Aadhaar={result['aadhaar_match']} | "
                 f"Score={avg_confidence:.2f} | "
-                f"Extracted: {extracted['Name']}, {extracted['DOB']}, {extracted['Gender']}, {extracted['Aadhaar Number']}"
+                f"Extracted: {extracted['Name']}, {extracted['DOB']}, {extracted['Gender']}, { ['Aadhaar Number']}"
             )
 
-        except Exception as e:
-            logging.error(f"[{i+1}] {record.get('auth_id')} ❌ Error: {e}")
-            continue
+            if result['decision'] == 'ACCEPT':
+                decoded_aadhaar = record.get("decoded_aadhaar")
+                if decoded_aadhaar:
+                    refnum = generate_ref_number(decoded_aadhaar)
+                    print(f"📎 Aadhaar Ref Number: {refnum}")
+                    result_entry["aadhaar_refnum"] = refnum  # Optional: store in output
 
+                    # ✅ Update MongoDB record with ref number and status
+                    update_fields = {
+                        "aadhaar_status": "verified",
+                        "aadhaar_ref_number": refnum
+                    }
+
+                    collection.update_one(
+                        {"_id": record["_id"]},
+                        {"$set": update_fields}
+                    )
+                else:
+                    print(" Decoded Aadhaar number missing, skipping refnum fetch.")
+
+
+        except Exception as e:
+            logging.error(f"[{i+1}] {record.get('auth_id')}Error: {e}")
+            continue
+            
+        results.append(result_entry)
     # Save results
     if results:
         with open("aadhaar_verification_results.json", "w", encoding="utf-8") as f_json:
@@ -82,10 +126,10 @@ def run_batch_verification():
             writer.writeheader()
             writer.writerows(results)
     else:
-        logging.warning("⚠️ No results to write. No records passed processing.")
+        logging.warning(" No results to write. No records passed processing.")
 
     # Accuracy Summary
-    print("\n📊 Accuracy Report")
+    print("\n Accuracy Report")
     if results:
         decisions = [r['decision'] for r in results]
         counts = Counter(decisions)
@@ -99,7 +143,7 @@ def run_batch_verification():
             percent = sum(r[field] for r in results) / total
             print(f"{field:<15}: {percent:.2%}")
     else:
-        print("❌ No successful records processed.")
+        print("No successful records processed.")
 
 # Entry point
 if __name__ == "__main__":
