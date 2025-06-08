@@ -11,23 +11,30 @@ from paddleocr import PaddleOCR
 from datetime import datetime
 from pdf2image import convert_from_path
 from fuzzywuzzy import fuzz
+import threading
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
 class PaddleAadhaarExtractor:
-    def __init__(self, dpi=300):
+    def __init__(self, dpi=150):  # Reduced DPI for faster processing
         self.dpi = dpi
-        self.ocr = PaddleOCR(use_angle_cls=True, lang='en')
+        self._thread_local = threading.local()
+
+    def get_ocr(self):
+        if not hasattr(self._thread_local, "ocr"):
+            self._thread_local.ocr = PaddleOCR(use_angle_cls=False, lang='en')
+        return self._thread_local.ocr
 
     def image_from_pdf(self, pdf_path):
         return convert_from_path(pdf_path, dpi=self.dpi)
 
     def extract_text_lines(self, image):
-        result = self.ocr.ocr(image, cls=True)
-        self.last_raw_ocr_result = result 
-        lines = [line[1][0] for block in result for line in block if line[1][0].strip()]
-        for line in lines:
+        ocr = self.get_ocr()
+        result = ocr.ocr(image, cls=False)  # Angle classifier disabled for speed
+        self.last_raw_ocr_result = result
+        lines = [(line[1][0], line[0][1]) for block in result for line in block if line[1][0].strip()]
+        for line, _ in lines:
             logging.debug(f"[OCR LINE] {line}")
         return lines
 
@@ -37,21 +44,19 @@ class PaddleAadhaarExtractor:
         gender = aadhaar = ""
         EXCLUDE_WORDS = ['dob', 'birth', 'male', 'female', 'government', 'uidai', 'year', 'india', 'authority', 'issue']
 
-        for line in lines:
-            l = line.lower()
+        for text, pos in lines:
+            l = text.lower()
 
-            if re.search(r"^[a-zA-Z\s]{3,}$", line) and not any(w in l for w in EXCLUDE_WORDS):
-                cleaned = re.sub(r"^(mr|ms|mrs)\.?\s*", "", line, flags=re.I).strip()
+            if re.search(r"^[a-zA-Z\s]{3,}$", text) and not any(w in l for w in EXCLUDE_WORDS):
+                cleaned = re.sub(r"^(mr|ms|mrs)\.?\s*", "", text, flags=re.I).strip()
                 name_candidates.append(cleaned)
 
-            # Match any date pattern unless it includes issue-related keywords
-            if re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", line):
+            if re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", text):
                 if not any(iss_kw in l for iss_kw in ["issue", "issued", "year of issue"]):
-                    match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", line)
+                    match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", text)
                     if match:
-                        dob_candidates.append(match.group(1))
+                        dob_candidates.append((match.group(1), pos))
 
-            # Gender
             if not gender:
                 if 'male' in l:
                     gender = "Male"
@@ -60,15 +65,13 @@ class PaddleAadhaarExtractor:
                 elif 'transgender' in l:
                     gender = "Transgender"
 
-            # Aadhaar
             if not aadhaar:
-                digits = re.sub(r"\D", "", line)
+                digits = re.sub(r"\D", "", text)
                 if len(digits) == 12:
                     aadhaar = digits
 
         logging.debug(f"[DEBUG] DOB Candidates: {dob_candidates}")
 
-        # Pick best name match
         best_name = ""
         name_score = 0
         if record:
@@ -81,9 +84,9 @@ class PaddleAadhaarExtractor:
         else:
             best_name = name_candidates[0] if name_candidates else ""
 
-        # Parse DOB
         parsed_dob = ""
-        for dob in dob_candidates:
+        sorted_dobs = sorted(dob_candidates, key=lambda x: x[1])
+        for dob, _ in sorted_dobs:
             try:
                 parsed = datetime.strptime(dob.replace("/", "-"), "%d-%m-%Y").strftime("%Y-%m-%d")
                 year = int(parsed.split("-")[0])
@@ -181,19 +184,7 @@ def verify_fields(extracted, record):
     all_present = all([extracted_name, gender_extracted, dob_extracted, aadhaar_extracted])
     all_match = all([name_match, dob_match, gender_match, aadhaar_match])
 
-    decision = "ACCEPT" if all_present and all_match else "MANUAL_REVIEW"
-
-    # logging.info("------ VERIFICATION DEBUG ------")
-    # logging.info(f"Record Name       : '{full_name}'")
-    # logging.info(f"Extracted Name    : '{extracted_name}' (Score: {name_score})")
-    # logging.info(f"Record DOB        : '{raw_dob}' → Normalized: '{dob_record}'")
-    # logging.info(f"Extracted DOB     : '{dob_extracted}'")
-    # logging.info(f"Gender            : input='{gender_input}' vs extracted='{gender_extracted}' → {gender_match}")
-    # logging.info(f"Decoded Aadhaar   : '{decoded_aadhaar}'")
-    # logging.info(f"Extracted Aadhaar : '{aadhaar_extracted}'")
-    # logging.info(f"Matches           : Name={name_match}, DOB={dob_match}, Gender={gender_match}, Aadhaar={aadhaar_match}")
-    # logging.info(f"Final Decision    : {decision}")
-    # logging.info("-------------------------------")
+    decision = "Accept" if all_present and all_match else "Manual_Review"
 
     return {
         "name_match": name_match,
