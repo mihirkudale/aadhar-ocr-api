@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Aadhaar Verifier</title>
+  <style>
+    body {
+      font-family: Arial;
+      padding: 40px;
+      background: #f4f4f4;
+    }
+    .container {
+      background: white;
+      padding: 20px;
+      border-radius: 10px;
+      max-width: 1200px;
+      margin: auto;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+      display: flex;
+      gap: 20px;
+    }
+    .left {
+      flex: 1;
+    }
+    .right {
+      flex: 1;
+    }
+    input, button {
+      margin-top: 10px;
+      display: block;
+      width: 100%;
+      padding: 10px;
+      font-size: 1em;
+    }
+    .result {
+      margin-top: 20px;
+      background: #eef;
+      padding: 15px;
+      border-radius: 5px;
+    }
+    .label {
+      font-weight: bold;
+    }
+    iframe {
+      width: 100%;
+      height: 700px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="left">
+      <h2>Aadhaar Verifier</h2>
+      <form id="aadhaarForm">
+        <input type="file" name="aadhaar_pdf" accept="application/pdf" required />
+        <button type="submit">Verify Aadhaar</button>
+        <button type="button" id="resetBtn">Reset</button>
+      </form>
+      <div id="result" class="result" style="display: none;"></div>
+    </div>
+    <div class="right">
+      <h3>PDF Preview</h3>
+      <iframe id="pdfPreview" title="PDF Preview" style="display: none;"></iframe>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('aadhaarForm');
+    const resultDiv = document.getElementById('result');
+    const pdfPreview = document.getElementById('pdfPreview');
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+
+      const formData = new FormData(this);
+      fetch('/upload-aadhaar', {
+        method: 'POST',
+        body: formData
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.error) {
+          alert(data.error);
+          return;
+        }
+
+        const output = `
+          <div><span class="label">Name:</span> ${data.extracted_name || "N/A"}</div>
+          <div><span class="label">Gender:</span> ${data.extracted_gender || "N/A"}</div>
+          <div><span class="label">DOB:</span> ${data.extracted_dob || "N/A"}</div>
+          <div><span class="label">Aadhaar Number:</span> ${data.extracted_aadhaar || "N/A"}</div>
+          <div><span class="label">Decision:</span> ${data.decision || "N/A"}</div>
+          <div><span class="label">Status:</span> ${data.status || "N/A"}</div>
+          <div><span class="label">OCR Confidence:</span> ${data.ocr_confidence || 0}%</div>
+          <div><span class="label">Aadhaar Ref Number:</span> ${data.aadhaar_refnum || "N/A"}</div>
+        `;
+
+        resultDiv.innerHTML = output;
+        resultDiv.style.display = "block";
+      })
+      .catch(err => {
+        alert("Error uploading file. See console for details.");
+        console.error(err);
+      });
+    });
+
+    document.querySelector('input[type="file"]').addEventListener('change', function () {
+      const file = this.files[0];
+      if (file && file.type === "application/pdf") {
+        const fileURL = URL.createObjectURL(file);
+        pdfPreview.src = fileURL;
+        pdfPreview.style.display = "block";
+      } else {
+        pdfPreview.src = "";
+        pdfPreview.style.display = "none";
+      }
+    });
+
+    document.getElementById('resetBtn').addEventListener('click', function () {
+      form.reset();
+      resultDiv.innerHTML = '';
+      resultDiv.style.display = "none";
+      pdfPreview.src = "";
+      pdfPreview.style.display = "none";
+    });
+  </script>
+</body>
+</html>
