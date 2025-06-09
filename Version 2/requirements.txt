@@ -1,0 +1,8 @@
+paddlepaddle==2.5.1
+paddleocr==2.7.3
+numpy
+opencv-python
+pdf2image
+fuzzywuzzy
+python-Levenshtein
+flask
