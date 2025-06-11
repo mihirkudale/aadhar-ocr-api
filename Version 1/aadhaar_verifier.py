@@ -41,7 +41,7 @@ class PaddleAadhaarExtractor:
     def extract_fields(self, lines, record=None):
         name_candidates = []
         dob_candidates = []
-        gender = aadhaar = ""
+        aadhaar = ""
         EXCLUDE_WORDS = ['dob', 'birth', 'male', 'female', 'government', 'uidai', 'year', 'india', 'authority', 'issue']
 
         for text, pos in lines:
@@ -56,14 +56,6 @@ class PaddleAadhaarExtractor:
                     match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", text)
                     if match:
                         dob_candidates.append((match.group(1), pos))
-
-            if not gender:
-                if 'male' in l:
-                    gender = "Male"
-                elif 'female' in l:
-                    gender = "Female"
-                elif 'transgender' in l:
-                    gender = "Transgender"
 
             if not aadhaar:
                 digits = re.sub(r"\D", "", text)
@@ -100,7 +92,6 @@ class PaddleAadhaarExtractor:
 
         return {
             "Name": best_name,
-            "Gender": gender,
             "DOB": parsed_dob,
             "Aadhaar Number": aadhaar
         }
@@ -127,17 +118,28 @@ class PaddleAadhaarExtractor:
             else:
                 file_path = file_path_or_url
 
-            pages = self.image_from_pdf(file_path)
+            try:
+                pages = self.image_from_pdf(file_path)
+            except Exception as e:
+                logging.error(f"[PDF ERROR] Could not read PDF at {file_path}: {e}")
+                return {"Name": "", "DOB": "", "Aadhaar Number": ""}
+
             for page in pages:
-                lines = self.extract_text_lines(np.array(page))
-                extracted = self.extract_fields(lines, record)
-                if all(extracted.values()):
-                    return extracted
-            return extracted
+                try:
+                    lines = self.extract_text_lines(np.array(page))
+                    extracted = self.extract_fields(lines, record)
+                    if all(extracted.values()):
+                        return extracted
+                except Exception as e:
+                    logging.warning(f"[PAGE ERROR] Skipped a page due to: {e}")
+                    continue
+
+            return extracted if 'extracted' in locals() else {"Name": "", "DOB": "", "Aadhaar Number": ""}
 
         except Exception as e:
-            logging.error(f"Extraction failed: {e}")
-            return {"Name": "", "Gender": "", "DOB": "", "Aadhaar Number": ""}
+            logging.error(f"[EXTRACTION ERROR] {file_path_or_url} → {e}")
+            return {"Name": "", "DOB": "", "Aadhaar Number": ""}
+
         finally:
             if temp_pdf_path and os.path.exists(temp_pdf_path):
                 os.remove(temp_pdf_path)
@@ -171,25 +173,33 @@ def verify_fields(extracted, record):
     raw_dob = record.get("dateOfbirth", "")
     dob_record = normalize_dob(raw_dob)
     dob_extracted = extracted["DOB"]
-    dob_match = dob_extracted == dob_record
 
-    gender_extracted = extracted["Gender"].lower()
-    gender_input = record.get("gender", "").lower()
-    gender_match = gender_extracted == gender_input
+    # Enhanced DOB logic with year-only match fallback
+    dob_match = False
+    try:
+        if dob_extracted == dob_record:
+            dob_match = True
+        else:
+            record_year = datetime.strptime(dob_record, "%Y-%m-%d").year
+            extracted_year = datetime.strptime(dob_extracted, "%Y-%m-%d").year
+            if record_year == extracted_year:
+                logging.info(f"[DOB MATCH] Accepted by year match: DB={dob_record}, OCR={dob_extracted}")
+                dob_match = True
+    except:
+        pass
 
     decoded_aadhaar = decode_base64_aadhaar(record.get("aadhar_number", ""))
     aadhaar_extracted = extracted["Aadhaar Number"]
     aadhaar_match = aadhaar_extracted == decoded_aadhaar
 
-    all_present = all([extracted_name, gender_extracted, dob_extracted, aadhaar_extracted])
-    all_match = all([name_match, dob_match, gender_match, aadhaar_match])
+    all_present = all([extracted_name, dob_extracted, aadhaar_extracted])
+    all_match = all([name_match, dob_match, aadhaar_match])
 
     decision = "Accept" if all_present and all_match else "Manual_Review"
 
     return {
         "name_match": name_match,
         "dob_match": dob_match,
-        "gender_match": gender_match,
         "aadhaar_match": aadhaar_match,
         "decision": decision
     }

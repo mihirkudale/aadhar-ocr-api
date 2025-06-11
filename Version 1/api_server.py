@@ -30,7 +30,7 @@ scheduler.init_app(app)
 def index():
     return "Aadhaar API with APScheduler (Windows safe) is running."
 
-# 🧠 Verification logic
+# Verification logic
 def verify_single(record):
     try:
         aadhaar_url = f"https://cpetp.trti-maha.in/{record.get('aadhaar_doc', '')}"
