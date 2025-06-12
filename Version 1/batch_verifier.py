@@ -6,7 +6,7 @@ import sys
 import psutil
 import multiprocessing
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pymongo import MongoClient, ASCENDING
 import numpy as np
 import requests
@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from aadhaar_verifier import PaddleAadhaarExtractor, verify_fields, decode_base64_aadhaar
 
-# Setup logging
+# Setup loggingwil
 logging.getLogger("ppocr").setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -24,28 +24,9 @@ db = client["aadhar"]
 collection = db["cpetp_db.tbl_candidate(police_military)"]
 verification_collection = db["verification_results"]
 
-# Auto-detect resources
-cpu_cores = multiprocessing.cpu_count()
-available_gb = psutil.virtual_memory().total / (1024 ** 3)
-
-if available_gb >= 32:
-    BATCH_SIZE = 1500
-    max_workers = min(cpu_cores, 10)
-elif available_gb >= 24:
-    BATCH_SIZE = 1000
-    max_workers = min(cpu_cores, 8)
-elif available_gb >= 16:
-    BATCH_SIZE = 750
-    max_workers = min(cpu_cores, 6)
-elif available_gb >= 12:
-    BATCH_SIZE = 500
-    max_workers = min(cpu_cores, 4)
-elif available_gb >= 8:
-    BATCH_SIZE = 300
-    max_workers = min(cpu_cores, 3)
-else:
-    BATCH_SIZE = 100
-    max_workers = 2
+# Manual config for your laptop
+BATCH_SIZE = 1200
+max_workers = 12
 
 # CLI override
 if len(sys.argv) >= 3:
@@ -181,38 +162,40 @@ def process_record(record_tuple):
         logging.error(f"[{i+1}] {record.get('auth_id')} Error: {e}")
         return None
 
-from tqdm import tqdm  # Make sure this is imported at the top
-
 def run_batch_verification():
     start_batch = time.time()
 
+    # Create indexes for performance
     collection.create_index([("aadhar_number", ASCENDING)])
     verification_collection.create_index([("auth_id", ASCENDING)], unique=True)
     verification_collection.create_index([("decoded_aadhaar", ASCENDING)], unique=True)
 
-    # total = min(2000, collection.count_documents({}))
-    total = collection.count_documents({})
-    logging.info(f"Total records to process: {total}")
+    total = collection.count_documents({"aadhaar_status": {"$exists": False}})
+    logging.info(f"Total unverified records to process: {total}")
 
     verified_total = 0
     manual_review_total = 0
+    processed_so_far = 0
 
-    for skip in range(0, total, BATCH_SIZE):
+    while True:
         applicants = list(collection.find({
             "aadhaar_status": {"$exists": False}
-        }).skip(skip).limit(BATCH_SIZE))
+        }).limit(BATCH_SIZE))
 
-        logging.info(f"\n🔁 Processing batch {skip + 1} to {skip + len(applicants)}")
+        if not applicants:
+            break
+
+        logging.info(f"\n🔁 Processing batch of {len(applicants)} records (processed so far: {processed_so_far})")
 
         results = []
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(process_record, (record, i + skip, total)): i
+                executor.submit(process_record, (record, i + processed_so_far, total)): i
                 for i, record in enumerate(applicants)
             }
 
-            # Add live progress bar for this batch
-            for future in tqdm(as_completed(futures), total=len(futures), desc="🔄 Verifying", ncols=100):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="🔄 Verifying", dynamic_ncols=True, leave=True):
+
                 result = future.result()
                 if result:
                     results.append(result)
@@ -222,14 +205,23 @@ def run_batch_verification():
 
         verified_total += verified_count
         manual_review_total += manual_review_count
+        processed_so_far += len(applicants)
+        # Estimate finish time
+        elapsed_time = time.time() - start_batch
+        avg_time_per_record = elapsed_time / processed_so_far if processed_so_far else 0
+        remaining_records = total - processed_so_far
+        eta_seconds = avg_time_per_record * remaining_records
+        estimated_finish = datetime.now() + timedelta(seconds=eta_seconds)
+        print(f"⏳ Estimated finish time: {estimated_finish.strftime('%I:%M %p')}")
+
+
         logging.info(f"✅ Batch completed: Verified={verified_count}, Manual={manual_review_count}")
 
     total_time_sec = time.time() - start_batch
     print(f"\n✅ All batches completed in {total_time_sec:.2f} seconds")
-    print(f"🔢 Total records processed: {total}")
+    print(f"🔢 Total unverified records processed: {processed_so_far}")
     print(f"✅ Verified records updated: {verified_total}")
     print(f"📁 Manual review saved: {manual_review_total}")
-
 
 if __name__ == "__main__":
     print(f"\n🔧 Running with BATCH_SIZE = {BATCH_SIZE}, max_workers = {max_workers}")
